@@ -3,6 +3,7 @@ library(sqldf)
 library(tcltk)
 library(stringr)
 library(survival)
+library(testthat)
 
 #####
 # Define object used through out
@@ -12,9 +13,10 @@ new_folder <- NULL
 pb <- NULL
 conn <- NULL
 log_file <- NULL
-warn_old <- getOption("warn")
 db <- "driver_stats.db"
-final_tbl_name <- "HDs.RDS"
+final_tbl_name <- "hds.rds"
+
+options(warn = 1)
 
 sqlFromFile <- function(file){
   sql <- readLines(file)
@@ -41,31 +43,32 @@ conn_exp <- expression({
 })
 
 tryCatch({
-  options(warn = 1)
-
   # Check if db should made
   make_db <- file.exists(db)
-  if(make_db)
-    make_db <- "YES" ==
-    winDialog("yesno", "Do you want to remake the data base for the hard disks?")
+  make_db <- if(file.exists(db))
+    "YES" ==
+    winDialog(
+      "yesno", "Do you want to remake the data base for the hard disks?") else
+        TRUE
 
   log_file <- file("setup.log", if(make_db) "wt" else "at")
   sink(log_file, append = F, split = T, type = "output")
   sink(log_file, append = T, split = F, type = "message")
-  cat("\n#############\n ",  as.character(as.POSIXlt(Sys.time())), "\n#############\n\n")
+  cat("\n#############\n#",  as.character(as.POSIXlt(Sys.time())), "\n#############\n\n")
 
   #####
   # Create database
   if(make_db){
     if(file.exists(db))
       unlink(db, force = T)
+    
+    if(!dir.exists("data"))
+      dir.create("data")
 
     eval(conn_exp)
 
     queries <- sqlFromFile("create_table.sql")
     dbSendQueries(conn, queries)
-
-    dbListTables(conn)
 
     suffixes <- c("2013", "2014", "2015", "Q1_2016", "Q2_2016", "Q3_2016")
     for(suffix in suffixes){
@@ -75,23 +78,23 @@ tryCatch({
       cat("Downloading files for", suffix, "\n")
       tmp_files$data <- tempfile()
       download.file(data_url, tmp_files$data)
-      tmp_files$data_dir <- suffix
-      if(substr(suffix, 0, 1) == "Q")
-        tmp_files$data_dir <- paste0("data_", tmp_files$data_dir)
-      unzip(tmp_files$data)
+      data_dir <- if(substr(suffix, 0, 1) == "Q")
+         paste0("data_", suffix) else suffix
+      data_dir <- paste0("data/", data_dir)
+      unzip(tmp_files$data, exdir = "data")
       unlink(tmp_files$data)
       tmp_files$data <- NULL
 
       # Import
       cat("Adding data to database for", suffix, "\n")
-      fs <- dir(tmp_files$data_dir)
+      fs <- dir(data_dir)
       pb <- txtProgressBar(
         1, length(fs), 0, title = paste("Progress for file suffix", suffix),
         style=3)
       for(i in seq_along(fs)){
         setTxtProgressBar(pb, i)
         f <- fs[i]
-        f <- paste0("./", tmp_files$data_dir, "/", f)
+        f <- paste0("./", data_dir, "/", f)
         read.csv.sql(
           f, paste(
             "INSERT INTO drive_stats",
@@ -101,7 +104,7 @@ tryCatch({
           dbname = db)
       }
       close(pb)
-      unlink(tmp_files$data_dir, recursive = T, force = T)
+      unlink(data_dir, recursive = T, force = T)
     }
 
     #####
@@ -119,7 +122,6 @@ tryCatch({
   if(is.null(conn))
     eval(conn_exp)
 
-  # surv_tbl <- readRDS("tmp.RDS")
   surv_tbl <- dbReadTable(conn, "drive_stats_survival")
 
   # Make stats functions and use it
@@ -136,23 +138,23 @@ tryCatch({
 
   # Format data
   cat("Formatting data columns\n")
-  for(n in c("date", "min_date", "max_date")){
+  for(n in c("date", "min_date", "max_date"))
     surv_tbl[[n]] <- as.Date(surv_tbl[[n]])
-  }
 
   cat("There are a few different model where some are quite sparse:\n")
   sort(print(xtabs(~ model, surv_tbl, subset = !duplicated(surv_tbl$serial_number))))
 
-  test_that("All disks only have one model", expect_true(
+  test_that("All disks only have one model only", expect_true(
     all(tapply(surv_tbl$model, surv_tbl$serial_number, function(x) all(x[1] == x)))
   ))
 
   cat("Thus, we focus on the manufacturer in this script:\n")
   surv_tbl$manufacturer <- str_extract(surv_tbl$model, "^([A-z]+(?=\ ))|(ST)")
 
-  # "As noted in the BackBlaze article, models listed as HGST or Hitachi should be under the same label"
-  # Source: http://blog.applied.ai/survival-analysis-part2/
-
+  # "As noted in the BackBlaze article, models listed as HGST or Hitachi should 
+  # be under the same label". Source: 
+  # http://blog.applied.ai/survival-analysis-part2/
+  # So we merge the two manufacturer levels
   surv_tbl$manufacturer[surv_tbl$manufacturer == "Hitachi"] <- 'HGST'
 
   test_that("We found a manufacturer for all observations",
@@ -219,11 +221,11 @@ tryCatch({
     surv_tbl$capacity_bytes_GB[indx] <- replacement_sizes[i]
   }
 
-  test_that("There are not HDs with more than onse size",
+  test_that("There are not HDs with more than one size",
             expect_true(all(eval(all_sizes_equal_exp))))
 
   cat("There are some very small HDS\n")
-  xtabs(~surv_tbl$capacity_bytes_GB)
+  print(xtabs(~surv_tbl$capacity_bytes_GB))
 
   cat("We remove the smallest\n")
   surv_tbl <- surv_tbl[surv_tbl$capacity_bytes_GB > 1e2, ]
@@ -252,7 +254,8 @@ tryCatch({
 
   equal_min_n_max_h <- expression(
     sum(surv_tbl$min_hours == surv_tbl$max_hours))
-  cat("There are", eval(equal_min_n_max_h), "HDs with equal min and max hours. We remove these\n")
+  cat("There are", eval(equal_min_n_max_h), 
+      "HDs with equal min and max hours. We remove these\n")
 
   test_that("There are some cases with equal min and max hours",
             expect_gt(eval(equal_min_n_max_h), 0))
@@ -262,15 +265,10 @@ tryCatch({
 
   cat("There are some HDs which seems to have run for more than 20 years. We remove these\n")
 
-  test_that("Some have run for more than 20",
+  test_that("Some have run for more than 20 years which is not possible",
             expect_true(any(surv_tbl$max_hours > 365 * 24 * 20)))
 
   surv_tbl <- surv_tbl[surv_tbl$max_hours < 365 * 24 * 20, ]
-
-  # par(mfcol = c(2, 1))
-  # by(surv_tbl[!duplicated(surv_tbl$serial_number), ],
-  #    surv_tbl$n_fails[!duplicated(surv_tbl$serial_number)],
-  #    function(x) hist(x$max_hours))
 
   stats_func()
 
@@ -293,7 +291,7 @@ tryCatch({
   tmp_fit <- coxph(
     Surv(max_hours, n_fails > 0) ~ manufacturer + size, tmp_dat)
 
-  # tmp_fit$coefficients
+  print(tmp_fit$coefficients)
 
   test_that("Roughly matches w/ 2015 example", {
     coefs <- tmp_fit$coefficients
@@ -303,10 +301,10 @@ tryCatch({
     expect_true(1.5 < coefs["size3"] && coefs["size3"] < 3)
   })
 
-  # # Compare with size with http://blog.applied.ai/survival-analysis-part2/
-  # # It seems like they have purchased some new HDs of size 4Tb and larger since
-  # # this analysis
-  # xtabs(~tmp_dat$size)
+  # Compare with size with http://blog.applied.ai/survival-analysis-part2/
+  # It seems like they have purchased some new HDs of size 4Tb and larger since
+  # this analysis
+  print(xtabs(~tmp_dat$size))
 
   #####
   # Make table for survival analysis
@@ -339,16 +337,6 @@ tryCatch({
 
   final_tbl <- eval(expres)
 
-  # summary(final_tbl)
-
-  # TODO: Why are there extreme counts of smart_12? The disk cannot have had that many power cycles!
-  # TODO: Should we be aware of extreme values for some of the others?
-  # TODO: How to treat tha NAs / missing fields for smart_187 to smart_189
-  # TODO: Are failures also when they change HDs due to some of the covariates? If so, which?
-  # TODO: what is the scan errors in 'Failure Trends in a Large Disk Drive Population'
-  # TODO: fill in the a zero dummy value for those w/ first observation that end within the first week of running
-  # TODO: Some HDs seems to jump in time (like W300R8HJ). Smart_12 though seems consistent with date (and not the smart_9). Though, there is a jump
-
   # Add binary features and cum sums
   for(n in covs[covs %in% c("smart_197")]){
     final_tbl[[paste0(n, "_bin")]] <- final_tbl[[n]] > 0
@@ -359,8 +347,16 @@ tryCatch({
     final_tbl[[paste0(n, "_cumsum")]] <- unlist(tapply(
       final_tbl[[n]], final_tbl$serial_number, cumsum))
   }
+  
+  # Change column order
+  ord <- c(
+    "serial_number", "model", "manufacturer", "tstart", "tstop", "fails",
+    "size_tb", colnames(final_tbl)[grepl("^smart_", colnames(final_tbl))])
+  stopifnot(all(ord %in% colnames(final_tbl)))
+  ord <- c(ord, setdiff(colnames(final_tbl), ord))
+  final_tbl <- final_tbl[, ord]
 
-  saveRDS(final_tbl, final_tbl_name)
+  saveRDS(final_tbl, final_tbl_name, compress = "xz")
 
   #####
   # Check final tbl versus data from the orginal data base
@@ -445,25 +441,21 @@ tryCatch({
   if(!is.null(log_file))
     close(log_file)
 
-  options(warn = warn_old)
-
   rm(list = ls()[!ls() %in% cur_ls])
 })
 
 
-# #####
-# # "VACUUM" the db to decrease the size
-# # See http://www.tutorialspoint.com/sqlite/sqlite_vacuum.htm
-# tryCatch({
-#   options(warn = 1)
-#
-#   eval(conn_exp)
-#
-#   dbSendQuery(conn, "VACUUM;")
-# }, finally = {
-#   if(!is.null(conn))
-#     dbDisconnect(conn)
-# })
+#####
+# "VACUUM" the db to decrease the size
+# See http://www.tutorialspoint.com/sqlite/sqlite_vacuum.htm
+tryCatch({
+  eval(conn_exp)
+
+  dbSendQuery(conn, "VACUUM;")
+}, finally = {
+  if(!is.null(conn))
+    dbDisconnect(conn)
+})
 
 # dbGetQuery(
 #   conn,

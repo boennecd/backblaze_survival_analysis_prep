@@ -1,0 +1,5 @@
+TODO: Why are there extreme counts of smart_12? The disk cannot have had that many power cycles!
+TODO: Should we be aware of extreme values for some of the other covariates
+TODO: How to treat tha NAs / missing fields for smart_187 to smart_189
+TODO: what is the scan errors in 'Failure Trends in a Large Disk Drive Population'
+TODO: Some HDs seems to jump in time (like W300R8HJ). Smart_12 though seems consistent with date (and not the smart_9). Though, there are some with jumps
